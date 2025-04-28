@@ -1,0 +1,53 @@
+# Training Configuration for Raadha - Your Friendly Bestie
+
+# Model Configuration
+model:
+  base_model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  max_length: 2048
+  padding: true
+  truncation: true
+
+# LoRA Configuration
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# Training Parameters
+training:
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2e-4
+  num_train_epochs: 3
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  logging_steps: 10
+  save_steps: 100
+  eval_steps: 100
+  save_total_limit: 3
+  evaluation_strategy: "steps"
+  save_strategy: "steps"
+  load_best_model_at_end: true
+  metric_for_best_model: "loss"
+
+# Data Configuration
+data:
+  train_file: "data/train.json"
+  eval_file: "data/eval.json"
+  max_samples: null  # Set to null for full dataset
+
+# Output Configuration
+output:
+  output_dir: "models/raadha-lora"
+  logging_dir: "logs"
+
+# Hardware Configuration
+hardware:
+  fp16: false  # Disabled for MPS
+  bf16: false
+  gradient_checkpointing: true
+  optim: "adamw_torch" 
