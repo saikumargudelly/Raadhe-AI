@@ -34,7 +34,7 @@ To fine-tune Raadhe on your own dataset:
 python scripts/train.py
 ```
 
-The fine-tuned LoRA adapters will be saved in `models/raadhe-lora/`.
+The fine-tuned LoRA adapters will be saved in `models/raadha-lora/`.
 
 ## Testing
 

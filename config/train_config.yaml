@@ -3,32 +3,32 @@
 # Model Configuration
 model:
   base_model: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-  max_length: 2048
+  max_length: 256
   padding: true
   truncation: true
 
 # LoRA Configuration
 lora:
-  r: 16
-  alpha: 32
+  r: 2
+  alpha: 4
   dropout: 0.05
-  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  target_modules: ["q_proj"]
   bias: "none"
   task_type: "CAUSAL_LM"
 
 # Training Parameters
 training:
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 4
-  learning_rate: 2e-4
-  num_train_epochs: 3
-  warmup_ratio: 0.03
-  weight_decay: 0.01
-  logging_steps: 10
-  save_steps: 100
-  eval_steps: 100
-  save_total_limit: 3
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 32
+  learning_rate: 1e-3
+  num_train_epochs: 1
+  warmup_ratio: 0.005
+  weight_decay: 0.001
+  logging_steps: 50
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 1
   evaluation_strategy: "steps"
   save_strategy: "steps"
   load_best_model_at_end: true
@@ -38,7 +38,7 @@ training:
 data:
   train_file: "data/train.json"
   eval_file: "data/eval.json"
-  max_samples: null  # Set to null for full dataset
+  max_samples: 1000
 
 # Output Configuration
 output:
@@ -47,7 +47,8 @@ output:
 
 # Hardware Configuration
 hardware:
-  fp16: false  # Disabled for MPS
+  fp16: false
   bf16: false
   gradient_checkpointing: true
-  optim: "adamw_torch" 
+  optim: "adamw_torch"
+  use_cpu: true 

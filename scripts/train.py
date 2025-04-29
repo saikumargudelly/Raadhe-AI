@@ -2,6 +2,7 @@ import os
 import yaml
 import json
 import torch
+import glob
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -13,7 +14,8 @@ from peft import (
     LoraConfig,
     get_peft_model,
     prepare_model_for_kbit_training,
-    TaskType
+    TaskType,
+    PeftModel
 )
 from datasets import load_dataset
 import wandb
@@ -35,7 +37,21 @@ def load_lora_config(config_path: str = "config/lora_config.json") -> dict:
         config = json.load(f)
     return config
 
-def prepare_model_and_tokenizer(config: dict):
+def find_latest_checkpoint(output_dir):
+    """Find the latest checkpoint in the output directory."""
+    checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+    if not checkpoints:
+        return None
+    
+    # Extract checkpoint numbers and find the latest
+    checkpoint_numbers = [int(cp.split("-")[-1]) for cp in checkpoints]
+    latest_checkpoint_number = max(checkpoint_numbers)
+    latest_checkpoint = os.path.join(output_dir, f"checkpoint-{latest_checkpoint_number}")
+    
+    print(f"Found latest checkpoint: {latest_checkpoint}")
+    return latest_checkpoint
+
+def prepare_model_and_tokenizer(config, checkpoint_path=None):
     """Initialize and prepare the base model and tokenizer."""
     print("Loading base model and tokenizer...")
     
@@ -66,7 +82,7 @@ def prepare_model_and_tokenizer(config: dict):
     
     return model, tokenizer
 
-def prepare_lora_model(model, lora_config: dict):
+def prepare_lora_model(model, lora_config: dict, checkpoint_path=None):
     """Prepare model for LoRA fine-tuning."""
     print("Preparing model for LoRA training...")
     
@@ -87,6 +103,12 @@ def prepare_lora_model(model, lora_config: dict):
     
     # Apply LoRA
     model = get_peft_model(model, peft_config)
+    
+    # Load from checkpoint if available
+    if checkpoint_path:
+        print(f"Loading model from checkpoint: {checkpoint_path}")
+        model = PeftModel.from_pretrained(model, checkpoint_path)
+    
     model.train()
     
     # Enable gradient computation
@@ -113,11 +135,39 @@ def prepare_datasets(config: dict, tokenizer):
     """Prepare and process the datasets."""
     print("Preparing datasets...")
     
-    # Load datasets
-    dataset = load_dataset("json", data_files={
-        "train": config["data"]["train_file"],
-        "validation": config["data"]["eval_file"]
-    })
+    # Define cache paths
+    cache_dir = Path("cache")
+    cache_dir.mkdir(exist_ok=True)
+    train_cache_path = cache_dir / "train_cache"
+    eval_cache_path = cache_dir / "eval_cache"
+    
+    # Check if cached datasets exist
+    if train_cache_path.exists() and eval_cache_path.exists():
+        print("Loading datasets from cache...")
+        try:
+            dataset = {
+                "train": load_dataset("json", data_files=config["data"]["train_file"], cache_dir=str(train_cache_path)),
+                "validation": load_dataset("json", data_files=config["data"]["eval_file"], cache_dir=str(eval_cache_path))
+            }
+            print("Successfully loaded from cache!")
+        except Exception as e:
+            print(f"Error loading from cache: {e}")
+            print("Falling back to processing datasets...")
+            dataset = load_dataset("json", data_files={
+                "train": config["data"]["train_file"],
+                "validation": config["data"]["eval_file"]
+            })
+    else:
+        # Load datasets
+        dataset = load_dataset("json", data_files={
+            "train": config["data"]["train_file"],
+            "validation": config["data"]["eval_file"]
+        })
+    
+    # Apply max_samples limit if specified
+    if config["data"]["max_samples"] is not None:
+        print(f"Limiting dataset to {config['data']['max_samples']} samples")
+        dataset["train"] = dataset["train"].select(range(min(config["data"]["max_samples"], len(dataset["train"]))))
     
     # Format datasets
     dataset = dataset.map(format_chatml, remove_columns=["messages"])
@@ -141,7 +191,7 @@ def prepare_datasets(config: dict, tokenizer):
     
     return tokenized_dataset
 
-def setup_training_args(config: dict) -> TrainingArguments:
+def setup_training_args(config: dict, resume_from_checkpoint=None) -> TrainingArguments:
     """Setup training arguments with memory optimizations."""
     # Ensure output directory exists
     Path(config["output"]["output_dir"]).mkdir(parents=True, exist_ok=True)
@@ -150,14 +200,14 @@ def setup_training_args(config: dict) -> TrainingArguments:
     eval_strategy = config["training"]["evaluation_strategy"]
     
     # Reduce batch sizes for memory efficiency
-    train_batch_size = 1  # Minimum batch size
-    eval_batch_size = 1   # Minimum batch size
+    train_batch_size = config["training"]["per_device_train_batch_size"]
+    eval_batch_size = config["training"]["per_device_eval_batch_size"]
     
     return TrainingArguments(
         output_dir=config["output"]["output_dir"],
         per_device_train_batch_size=train_batch_size,
         per_device_eval_batch_size=eval_batch_size,
-        gradient_accumulation_steps=16,  # Increase gradient accumulation
+        gradient_accumulation_steps=config["training"]["gradient_accumulation_steps"],
         learning_rate=float(config["training"]["learning_rate"]),
         num_train_epochs=config["training"]["num_train_epochs"],
         warmup_ratio=config["training"]["warmup_ratio"],
@@ -170,10 +220,10 @@ def setup_training_args(config: dict) -> TrainingArguments:
         save_strategy=eval_strategy,
         load_best_model_at_end=config["training"]["load_best_model_at_end"],
         metric_for_best_model=config["training"]["metric_for_best_model"],
-        fp16=False,  # Disable mixed precision
-        bf16=False,  # Disable mixed precision
-        gradient_checkpointing=True,  # Always enable gradient checkpointing
-        optim="adamw_torch",  # Use PyTorch's AdamW
+        fp16=config["hardware"]["fp16"],
+        bf16=config["hardware"]["bf16"],
+        gradient_checkpointing=config["hardware"]["gradient_checkpointing"],
+        optim=config["hardware"]["optim"],
         report_to="wandb",
         # Memory optimizations
         dataloader_pin_memory=False,
@@ -184,7 +234,9 @@ def setup_training_args(config: dict) -> TrainingArguments:
         optim_args="eps=1e-8",
         # Force CPU
         no_cuda=True,
-        use_mps_device=False
+        use_mps_device=False,
+        # Resume from checkpoint
+        resume_from_checkpoint=resume_from_checkpoint
     )
 
 def main():
@@ -194,16 +246,27 @@ def main():
         config = load_config()
         lora_config = load_lora_config()
         
+        # Check for existing checkpoints
+        output_dir = config["output"]["output_dir"]
+        latest_checkpoint = find_latest_checkpoint(output_dir)
+        
         # Initialize wandb
+        run_name = f"lora-finetune-{config['model']['base_model'].split('/')[-1]}"
+        if latest_checkpoint:
+            run_name += f"-resumed-{latest_checkpoint.split('-')[-1]}"
+        
         wandb.init(
             project="raadhe-ai",
             config=config,
-            name=f"lora-finetune-{config['model']['base_model'].split('/')[-1]}"
+            name=run_name,
+            resume="allow" if latest_checkpoint else None
         )
         
         # Prepare model and tokenizer
         model, tokenizer = prepare_model_and_tokenizer(config)
-        model = prepare_lora_model(model, lora_config)
+        
+        # Prepare LoRA model, loading from checkpoint if available
+        model = prepare_lora_model(model, lora_config, latest_checkpoint)
         
         # Move model to CPU
         device = torch.device("cpu")
@@ -213,8 +276,8 @@ def main():
         # Prepare datasets
         tokenized_dataset = prepare_datasets(config, tokenizer)
         
-        # Setup training arguments
-        training_args = setup_training_args(config)
+        # Setup training arguments with checkpoint resumption
+        training_args = setup_training_args(config, latest_checkpoint)
         
         # Create data collator
         data_collator = DataCollatorForLanguageModeling(
@@ -234,7 +297,7 @@ def main():
         
         # Train model
         print("Starting training...")
-        trainer.train()
+        trainer.train(resume_from_checkpoint=latest_checkpoint)
         
         # Save final model
         print("Saving model...")
